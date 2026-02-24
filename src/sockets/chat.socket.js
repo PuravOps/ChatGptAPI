@@ -21,6 +21,8 @@ module.exports = (io) => {
           sender,
           receiver,
           message,
+          seen: false,
+          seenAt: null,
         })
 
         io.to(receiver).emit("receiveMessage", newMessage)
@@ -28,6 +30,28 @@ module.exports = (io) => {
       } catch (err) {
         console.error("sendMessage error:", err)
         socket.emit("messageError", { message: "Failed to send message" })
+      }
+    })
+
+    socket.on("markSeen", async (data) => {
+      try {
+        const { sender, receiver } = data || {}
+        if (!sender || !receiver) return
+
+        const seenAt = new Date()
+        const result = await Message.updateMany(
+          { sender, receiver, seen: { $ne: true } },
+          { $set: { seen: true, seenAt } },
+        )
+
+        io.to(sender).emit("messagesSeen", {
+          sender,
+          receiver,
+          seenAt: seenAt.toISOString(),
+          modifiedCount: result.modifiedCount ?? 0,
+        })
+      } catch (err) {
+        console.error("markSeen error:", err)
       }
     })
 
