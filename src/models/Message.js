@@ -5,8 +5,14 @@ const messageSchema = new mongoose.Schema(
     sender: { type: String, required: true }, // phone
     receiver: { type: String, required: true }, // phone
     message: { type: String, required: true },
+
     seen: { type: Boolean, default: false },
     seenAt: { type: Date, default: null },
+
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date, default: null },
+
+    editedAt: { type: Date, default: null },
   },
   { timestamps: true },
 )

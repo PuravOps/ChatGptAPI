@@ -23,6 +23,9 @@ module.exports = (io) => {
           message,
           seen: false,
           seenAt: null,
+          isDeleted: false,
+          deletedAt: null,
+          editedAt: null,
         })
 
         io.to(receiver).emit("receiveMessage", newMessage)
@@ -40,7 +43,7 @@ module.exports = (io) => {
 
         const seenAt = new Date()
         const result = await Message.updateMany(
-          { sender, receiver, seen: { $ne: true } },
+          { sender, receiver, seen: { $ne: true }, isDeleted: { $ne: true } },
           { $set: { seen: true, seenAt } },
         )
 
@@ -52,6 +55,46 @@ module.exports = (io) => {
         })
       } catch (err) {
         console.error("markSeen error:", err)
+      }
+    })
+
+    // Broadcast-only delete: REST API performs the soft delete; this notifies both users.
+    socket.on("deleteMessage", async (data) => {
+      try {
+        const { messageId } = data || {}
+        if (!messageId) return
+
+        const msg = await Message.findById(messageId)
+        if (!msg) return
+
+        // If a client uses socket-only delete, still soft-delete here.
+        if (!msg.isDeleted) {
+          await Message.updateOne(
+            { _id: messageId },
+            { $set: { isDeleted: true, deletedAt: new Date() } },
+          )
+        }
+
+        io.to(msg.sender).emit("messageDeleted", { messageId })
+        io.to(msg.receiver).emit("messageDeleted", { messageId })
+      } catch (err) {
+        console.error("deleteMessage error:", err)
+      }
+    })
+
+    // Broadcast-only update: REST API updates message text; this notifies both users.
+    socket.on("updateMessage", async (data) => {
+      try {
+        const { messageId } = data || {}
+        if (!messageId) return
+
+        const msg = await Message.findById(messageId)
+        if (!msg || msg.isDeleted) return
+
+        io.to(msg.sender).emit("messageUpdated", { message: msg })
+        io.to(msg.receiver).emit("messageUpdated", { message: msg })
+      } catch (err) {
+        console.error("updateMessage error:", err)
       }
     })
 
