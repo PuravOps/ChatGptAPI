@@ -12,6 +12,9 @@ const io = new Server(server, {
   }
 })
 
+
+// make io available to express routes
+app.set('io', io)
 require('./src/sockets/chat.socket')(io)
 
 server.listen(process.env.PORT, () => {
