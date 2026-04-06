@@ -12,6 +12,8 @@ app.get("/api/ping", (req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() })
 })
 
+app.use("/api/uploads", require("./routes/upload.routes"))
+
 // ðŸ”¥ DB middleware (runs before routes)
 app.use(async (req, res, next) => {
   await connectDB()

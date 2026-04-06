@@ -1,6 +1,78 @@
 ﻿const router = require("express").Router()
 const Message = require("../models/Message")
 
+const crypto = require("crypto")
+
+const RICH_PREFIX = "__SLRICH__:"
+
+const sha1 = (value) => crypto.createHash("sha1").update(value).digest("hex")
+
+const signCloudinaryParams = (params, apiSecret) => {
+  const keys = Object.keys(params)
+    .filter((k) => params[k] !== undefined && params[k] !== null && params[k] !== "")
+    .sort()
+  const toSign = keys.map((k) => `${k}=${params[k]}`).join("&")
+  return sha1(`${toSign}${apiSecret}`)
+}
+
+const parseRichMessage = (raw) => {
+  if (typeof raw !== "string" || !raw.startsWith(RICH_PREFIX)) return null
+  try {
+    return JSON.parse(raw.slice(RICH_PREFIX.length))
+  } catch {
+    return null
+  }
+}
+
+const normalizeCloudinaryDestroyType = (value, mimeType) => {
+  if (value === "image" || value === "video" || value === "raw") return value
+  const mt = (mimeType || "").toLowerCase()
+  if (mt.startsWith("image/")) return "image"
+  if (mt.startsWith("video/")) return "video"
+  return "raw"
+}
+
+const destroyCloudinaryAsset = async ({ publicId, resourceType, mimeType }) => {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME
+  const apiKey = process.env.CLOUDINARY_API_KEY
+  const apiSecret = process.env.CLOUDINARY_API_SECRET
+
+  if (!cloudName || !apiKey || !apiSecret) {
+    throw new Error("Missing Cloudinary env vars")
+  }
+
+  const rt = normalizeCloudinaryDestroyType(resourceType, mimeType)
+  const timestamp = Math.floor(Date.now() / 1000)
+  const paramsToSign = { public_id: publicId, timestamp, invalidate: "true" }
+  const signature = signCloudinaryParams(paramsToSign, apiSecret)
+
+  const endpoint = `https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/${rt}/destroy`
+  const form = new FormData()
+  form.append("public_id", publicId)
+  form.append("api_key", apiKey)
+  form.append("timestamp", String(timestamp))
+  form.append("invalidate", "true")
+  form.append("signature", signature)
+
+  const resp = await fetch(endpoint, { method: "POST", body: form })
+  let data = {}
+  try {
+    data = await resp.json()
+  } catch {
+    // ignore
+  }
+
+  if (!resp.ok) {
+    throw new Error(data?.error?.message || `Cloudinary destroy failed (${resp.status})`)
+  }
+
+  const result = data?.result
+  if (result && result !== "ok" && result !== "not found") {
+    throw new Error(`Cloudinary destroy returned: ${result}`)
+  }
+  return { result }
+}
+
 const parseLimit = (value, fallback) => {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return fallback
@@ -178,25 +250,40 @@ router.post("/games/:gameId/move", async (req, res) => {
   }
 })
 
-// Soft delete message
+// Soft delete message (also deletes Cloudinary attachment for file messages)
 router.delete("/:id", async (req, res) => {
   const { id } = req.params
 
   try {
-    const updated = await Message.findOneAndUpdate(
-      { _id: id, isDeleted: { $ne: true } },
-      { $set: { isDeleted: true, deletedAt: new Date() } },
-      { new: true },
-    )
+    const msg = await Message.findById(id)
+    if (!msg || msg.isDeleted) return res.status(404).json({ message: "Message not found" })
 
-    if (!updated) return res.status(404).json({ message: "Message not found" })
+    // best-effort: delete Cloudinary asset if this is a file message
+    const decoded = parseRichMessage(msg.message)
+    if (decoded && decoded.v === 1 && decoded.type === "file") {
+      const publicId = decoded.cloudinaryPublicId
+      if (publicId) {
+        try {
+          await destroyCloudinaryAsset({
+            publicId,
+            resourceType: decoded.cloudinaryResourceType,
+            mimeType: decoded.mimeType,
+          })
+        } catch (e) {
+          console.warn("Cloudinary destroy failed", e?.message || e)
+        }
+      }
+    }
 
-    res.json({ ok: true, message: updated })
+    msg.isDeleted = true
+    msg.deletedAt = new Date()
+    await msg.save()
+
+    res.json({ ok: true, message: msg })
   } catch (error) {
     res.status(500).json({ message: error.message })
   }
 })
-
 // Update message text
 router.put("/:id", async (req, res) => {
   const { id } = req.params
@@ -328,5 +415,6 @@ router.delete("/:id/reactions", async (req, res) => {
 })
 
 module.exports = router
+
 
 
