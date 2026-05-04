@@ -19,12 +19,37 @@ const findOneAndUpdateByIdOrGameId = async (id, update, opts) => {
   return await Message.findOneAndUpdate({ gameId: id }, update, opts)
 }
 
-module.exports = (io) => {
+module.exports = (io, presenceStore) => {
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id)
 
     socket.on("join", (userId) => {
       socket.join(userId)
+      presenceStore?.join(userId, socket.id)
+    })
+
+    socket.on("presence:heartbeat", (data) => {
+      const { userPhone, activeThreadPhone, isChatActive } = data || {}
+      if (!userPhone) return
+      presenceStore?.heartbeat(userPhone, activeThreadPhone, isChatActive)
+    })
+
+    socket.on("presence:thread", (data) => {
+      const { userPhone, activeThreadPhone, isChatActive } = data || {}
+      if (!userPhone) return
+      presenceStore?.setActiveThread(userPhone, activeThreadPhone, isChatActive)
+    })
+
+    socket.on("typing:start", (data) => {
+      const { userPhone, targetUserPhone } = data || {}
+      if (!userPhone || !targetUserPhone) return
+      presenceStore?.startTyping(userPhone, targetUserPhone)
+    })
+
+    socket.on("typing:stop", (data) => {
+      const { userPhone, targetUserPhone } = data || {}
+      if (!userPhone) return
+      presenceStore?.stopTyping(userPhone, targetUserPhone)
     })
 
     socket.on("sendMessage", async (data) => {
@@ -35,6 +60,9 @@ module.exports = (io) => {
           socket.emit("messageError", { message: "Invalid message payload" })
           return
         }
+
+        presenceStore?.heartbeat(sender, receiver)
+        presenceStore?.stopTyping(sender, receiver)
 
         // Special handling for inline game messages (server owns game state)
         const GAME_PREFIX = "__SLGAME__:"
@@ -134,6 +162,7 @@ module.exports = (io) => {
         const { gameId, index, playerId } = data || {}
         console.log(`socket ${socket.id} received game.move`, { gameId, index, playerId })
         if (!gameId || typeof index !== "number" || !playerId) return
+        presenceStore?.heartbeat(playerId)
 
         // Find by either ObjectId _id or string gameId (safe against cast errors)
         const msg = await findMessageByIdOrGameId(gameId)
@@ -192,6 +221,7 @@ module.exports = (io) => {
       try {
         const { gameId, requesterId } = data || {}
         if (!gameId || !requesterId) return
+        presenceStore?.heartbeat(requesterId)
         const msg = await findMessageByIdOrGameId(gameId)
         if (!msg) return
         if (!msg.message || !msg.message.startsWith("__SLGAME__:")) return
@@ -231,6 +261,7 @@ module.exports = (io) => {
       try {
         const { messageId, emoji, userPhone } = data || {}
         if (!messageId || !emoji || !userPhone) return
+        presenceStore?.heartbeat(userPhone)
 
         const msg = await Message.findById(messageId)
         if (!msg || msg.isDeleted) return
@@ -276,6 +307,7 @@ module.exports = (io) => {
       try {
         const { messageId, emoji, userPhone } = data || {}
         if (!messageId || !emoji || !userPhone) return
+        presenceStore?.heartbeat(userPhone)
 
         const msg = await Message.findById(messageId)
         if (!msg || msg.isDeleted) return
@@ -304,6 +336,7 @@ module.exports = (io) => {
       try {
         const { sender, receiver } = data || {}
         if (!sender || !receiver) return
+        presenceStore?.heartbeat(receiver, sender)
 
         const seenAt = new Date()
         const result = await Message.updateMany(
@@ -363,6 +396,7 @@ module.exports = (io) => {
     })
 
     socket.on("disconnect", () => {
+      presenceStore?.disconnectSocket(socket.id)
       console.log("User disconnected")
     })
   })
