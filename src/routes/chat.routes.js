@@ -4,6 +4,7 @@ const Message = require("../models/Message")
 const crypto = require("crypto")
 
 const RICH_PREFIX = "__SLRICH__:"
+const URL_REGEX = /https?:\/\/[^\s<>"'`]+/gi
 
 const sha1 = (value) => crypto.createHash("sha1").update(value).digest("hex")
 
@@ -79,6 +80,197 @@ const parseLimit = (value, fallback) => {
   return Math.min(200, Math.floor(n))
 }
 
+const cleanUrl = (url) => String(url || "").replace(/[),.!?;:]+$/g, "")
+
+const isGifUrl = (value) => {
+  const v = String(value || "").trim().toLowerCase()
+  if (!v || !/^https?:\/\//.test(v)) return false
+  return v.endsWith(".gif") || v.includes("giphy.com/") || v.includes("tenor.com/")
+}
+
+const isImageUrl = (value) => /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(String(value || "").split("?")[0] || "")
+const isVideoUrl = (value) => /\.(mp4|webm|ogg|mov|m4v|avi|mkv)$/i.test(String(value || "").split("?")[0] || "")
+
+const extractUrls = (value) => {
+  if (!value) return []
+  const matches = String(value).match(URL_REGEX) || []
+  return matches.map(cleanUrl).filter(Boolean)
+}
+
+const makeLinkLabel = (url) => {
+  try {
+    const parsed = new URL(url)
+    const path = parsed.pathname === "/" ? "" : parsed.pathname
+    return `${parsed.hostname}${path}`.slice(0, 120)
+  } catch {
+    return String(url).slice(0, 120)
+  }
+}
+
+const getConversationQuery = (user1, user2) => ({
+  isDeleted: { $ne: true },
+  $or: [
+    { sender: user1, receiver: user2 },
+    { sender: user2, receiver: user1 },
+  ],
+})
+
+const extractSharedContent = (messages) => {
+  const media = []
+  const files = []
+  const links = []
+  const seenMedia = new Set()
+  const seenFiles = new Set()
+  const seenLinks = new Set()
+
+  const pushMedia = (item) => {
+    const key = `${item.messageId}:${item.url}`
+    if (seenMedia.has(key)) return
+    seenMedia.add(key)
+    media.push(item)
+  }
+
+  const pushFile = (item) => {
+    const key = `${item.messageId}:${item.url}`
+    if (seenFiles.has(key)) return
+    seenFiles.add(key)
+    files.push(item)
+  }
+
+  const pushLink = (item) => {
+    const key = `${item.messageId}:${item.url}`
+    if (seenLinks.has(key)) return
+    seenLinks.add(key)
+    links.push(item)
+  }
+
+  for (const message of messages) {
+    const decoded = parseRichMessage(message.message)
+
+    const classifyTextUrls = (value) => {
+      const urls = extractUrls(value)
+      urls.forEach((url, index) => {
+        if (isGifUrl(url)) {
+          pushMedia({
+            id: `${message._id}:media:text-gif-${index}`,
+            messageId: String(message._id),
+            sender: message.sender,
+            createdAt: message.createdAt,
+            url,
+            title: "GIF",
+            mediaType: "gif",
+            text: value?.trim() || undefined,
+          })
+          return
+        }
+
+        if (isImageUrl(url)) {
+          pushMedia({
+            id: `${message._id}:media:text-image-${index}`,
+            messageId: String(message._id),
+            sender: message.sender,
+            createdAt: message.createdAt,
+            url,
+            title: "Image",
+            mediaType: "image",
+            text: value?.trim() || undefined,
+          })
+          return
+        }
+
+        if (isVideoUrl(url)) {
+          pushMedia({
+            id: `${message._id}:media:text-video-${index}`,
+            messageId: String(message._id),
+            sender: message.sender,
+            createdAt: message.createdAt,
+            url,
+            title: "Video",
+            mediaType: "video",
+            text: value?.trim() || undefined,
+          })
+          return
+        }
+
+        pushLink({
+          id: `${message._id}:link:${index}`,
+          messageId: String(message._id),
+          sender: message.sender,
+          createdAt: message.createdAt,
+          url,
+          label: makeLinkLabel(url),
+          text: value?.trim() || undefined,
+        })
+      })
+    }
+
+    if (!decoded) {
+      classifyTextUrls(message.message)
+      continue
+    }
+
+    classifyTextUrls(decoded.text)
+
+    if (decoded.type === "gif" && decoded.gifUrl) {
+      pushMedia({
+        id: `${message._id}:media:gif`,
+        messageId: String(message._id),
+        sender: message.sender,
+        createdAt: message.createdAt,
+        url: decoded.gifUrl,
+        title: decoded.text?.trim() || "GIF",
+        mediaType: "gif",
+        text: decoded.text?.trim() || undefined,
+      })
+      continue
+    }
+
+    if (decoded.type !== "file" || !decoded.fileUrl) continue
+
+    const base = {
+      messageId: String(message._id),
+      sender: message.sender,
+      createdAt: message.createdAt,
+      url: decoded.fileUrl,
+      mimeType: decoded.mimeType,
+      text: decoded.text?.trim() || undefined,
+    }
+
+    if ((decoded.mimeType || "").startsWith("image/") || isImageUrl(decoded.fileUrl)) {
+      pushMedia({
+        id: `${message._id}:media:file-image`,
+        title: decoded.fileName?.trim() || decoded.text?.trim() || "Image",
+        mediaType: "image",
+        ...base,
+      })
+      continue
+    }
+
+    if ((decoded.mimeType || "").startsWith("video/") || isVideoUrl(decoded.fileUrl)) {
+      pushMedia({
+        id: `${message._id}:media:file-video`,
+        title: decoded.fileName?.trim() || decoded.text?.trim() || "Video",
+        mediaType: "video",
+        ...base,
+      })
+      continue
+    }
+
+    pushFile({
+      id: `${message._id}:file:file`,
+      fileName: decoded.fileName?.trim() || "Attachment",
+      sizeBytes: decoded.sizeBytes,
+      ...base,
+    })
+  }
+
+  media.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+  files.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+  links.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+
+  return { media, files, links }
+}
+
 router.get("/unseen-counts/:receiver", async (req, res) => {
   const { receiver } = req.params
 
@@ -118,6 +310,51 @@ router.post("/mark-seen", async (req, res) => {
   }
 })
 
+router.get("/:chatId/media", async (req, res) => {
+  const { user1, user2 } = req.query || {}
+  if (!user1 || !user2) {
+    return res.status(400).json({ message: "user1 and user2 are required" })
+  }
+
+  try {
+    const messages = await Message.find(getConversationQuery(String(user1), String(user2))).sort({ createdAt: -1 })
+    const shared = extractSharedContent(messages)
+    return res.json(shared.media)
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
+  }
+})
+
+router.get("/:chatId/files", async (req, res) => {
+  const { user1, user2 } = req.query || {}
+  if (!user1 || !user2) {
+    return res.status(400).json({ message: "user1 and user2 are required" })
+  }
+
+  try {
+    const messages = await Message.find(getConversationQuery(String(user1), String(user2))).sort({ createdAt: -1 })
+    const shared = extractSharedContent(messages)
+    return res.json(shared.files)
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
+  }
+})
+
+router.get("/:chatId/links", async (req, res) => {
+  const { user1, user2 } = req.query || {}
+  if (!user1 || !user2) {
+    return res.status(400).json({ message: "user1 and user2 are required" })
+  }
+
+  try {
+    const messages = await Message.find(getConversationQuery(String(user1), String(user2))).sort({ createdAt: -1 })
+    const shared = extractSharedContent(messages)
+    return res.json(shared.links)
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
+  }
+})
+
 // Get messages (supports pagination)
 router.get("/:user1/:user2", async (req, res) => {
   const { user1, user2 } = req.params
@@ -125,13 +362,7 @@ router.get("/:user1/:user2", async (req, res) => {
   const before = req.query.before
 
   try {
-    const query = {
-      isDeleted: { $ne: true },
-      $or: [
-        { sender: user1, receiver: user2 },
-        { sender: user2, receiver: user1 },
-      ],
-    }
+    const query = getConversationQuery(user1, user2)
 
     if (before) {
       const d = new Date(before)
