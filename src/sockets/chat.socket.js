@@ -19,12 +19,37 @@ const findOneAndUpdateByIdOrGameId = async (id, update, opts) => {
   return await Message.findOneAndUpdate({ gameId: id }, update, opts)
 }
 
+const roomIdsForUser = (value) => {
+  const raw = String(value || "").trim()
+  if (!raw) return []
+
+  const ids = new Set([raw])
+  const compact = raw.replace(/[^\d+]/g, "")
+  if (compact) ids.add(compact)
+
+  const digits = compact.replace(/\D/g, "")
+  if (digits) {
+    ids.add(digits)
+    ids.add(`+${digits}`)
+  }
+
+  return Array.from(ids)
+}
+
+const emitToUserRooms = (io, userId, eventName, payload) => {
+  for (const roomId of roomIdsForUser(userId)) {
+    io.to(roomId).emit(eventName, payload)
+  }
+}
+
 module.exports = (io, presenceStore) => {
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id)
 
     socket.on("join", (userId) => {
-      socket.join(userId)
+      for (const roomId of roomIdsForUser(userId)) {
+        socket.join(roomId)
+      }
       presenceStore?.join(userId, socket.id)
     })
 
@@ -392,6 +417,46 @@ module.exports = (io, presenceStore) => {
         io.to(msg.receiver).emit("messageUpdated", { message: msg })
       } catch (err) {
         console.error("updateMessage error:", err)
+      }
+    })
+
+    // Broadcast-only pin update: REST API updates pin state; this notifies both users.
+    socket.on("pinMessage", async (data) => {
+      try {
+        const { messageId } = data || {}
+        if (!messageId) return
+
+        const msg = await Message.findById(messageId)
+        if (!msg || msg.isDeleted) return
+
+        io.to(msg.sender).emit("messagePinned", { message: msg })
+        io.to(msg.receiver).emit("messagePinned", { message: msg })
+      } catch (err) {
+        console.error("pinMessage error:", err)
+      }
+    })
+
+    socket.on("chatEffect", (data) => {
+      try {
+        const { sender, receiver, effect, eventId } = data || {}
+        if (!sender || !receiver) return
+        if (!["confetti", "punch", "love"].includes(effect)) return
+
+        presenceStore?.heartbeat(sender, receiver)
+
+        const payload = {
+          sender,
+          receiver,
+          effect,
+          eventId: eventId ? String(eventId) : undefined,
+          createdAt: new Date().toISOString(),
+        }
+
+        console.log("chatEffect broadcast", { sender, receiver, effect, eventId: payload.eventId })
+        emitToUserRooms(io, sender, "chatEffect", payload)
+        emitToUserRooms(io, receiver, "chatEffect", payload)
+      } catch (err) {
+        console.error("chatEffect error:", err)
       }
     })
 

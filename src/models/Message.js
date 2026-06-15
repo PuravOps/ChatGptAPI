@@ -17,12 +17,17 @@ const messageSchema = new mongoose.Schema(
     deletedAt: { type: Date, default: null },
 
     editedAt: { type: Date, default: null },
+
+    pinned: { type: Boolean, default: false },
+    pinnedAt: { type: Date, default: null },
+    pinnedBy: { type: String, default: null },
   },
   { timestamps: true },
 )
 
 messageSchema.index({ sender: 1, receiver: 1, createdAt: 1 })
 messageSchema.index({ receiver: 1, seen: 1, createdAt: 1 })
+messageSchema.index({ sender: 1, receiver: 1, pinned: 1, pinnedAt: -1 })
 
 module.exports = mongoose.model("Message", messageSchema)
 

@@ -355,6 +355,26 @@ router.get("/:chatId/links", async (req, res) => {
   }
 })
 
+router.get("/:chatId/pinned", async (req, res) => {
+  const { user1, user2 } = req.query || {}
+  if (!user1 || !user2) {
+    return res.status(400).json({ message: "user1 and user2 are required" })
+  }
+
+  try {
+    const messages = await Message.find({
+      ...getConversationQuery(String(user1), String(user2)),
+      pinned: true,
+    })
+      .sort({ pinnedAt: -1, createdAt: -1 })
+      .limit(3)
+
+    return res.json(messages)
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
+  }
+})
+
 // Get messages (supports pagination)
 router.get("/:user1/:user2", async (req, res) => {
   const { user1, user2 } = req.params
@@ -541,6 +561,54 @@ router.put("/:id", async (req, res) => {
     res.json(updated)
   } catch (error) {
     res.status(500).json({ message: error.message })
+  }
+})
+
+// Pin/unpin a message for both users in the conversation.
+router.post("/:id/pin", async (req, res) => {
+  const { id } = req.params
+  const { pinned, userPhone } = req.body || {}
+  const nextPinned = Boolean(pinned)
+
+  if (typeof userPhone !== "string" || !userPhone.trim()) {
+    return res.status(400).json({ message: "userPhone is required" })
+  }
+
+  try {
+    const msg = await Message.findById(id)
+    if (!msg || msg.isDeleted) return res.status(404).json({ message: "Message not found" })
+
+    const actor = userPhone.trim()
+    if (actor !== msg.sender && actor !== msg.receiver) {
+      return res.status(403).json({ message: "You can only pin messages from your own chats." })
+    }
+
+    if (nextPinned && !msg.pinned) {
+      const pinnedCount = await Message.countDocuments({
+        ...getConversationQuery(msg.sender, msg.receiver),
+        pinned: true,
+        _id: { $ne: msg._id },
+      })
+
+      if (pinnedCount >= 3) {
+        return res.status(409).json({ message: "You can pin up to 3 messages in this chat." })
+      }
+    }
+
+    msg.pinned = nextPinned
+    msg.pinnedAt = nextPinned ? new Date() : null
+    msg.pinnedBy = nextPinned ? actor : null
+    await msg.save()
+
+    const io = req.app?.get("io")
+    if (io) {
+      io.to(msg.sender).emit("messagePinned", { message: msg })
+      io.to(msg.receiver).emit("messagePinned", { message: msg })
+    }
+
+    return res.json(msg)
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
   }
 })
 
