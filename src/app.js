@@ -21,6 +21,7 @@ app.use(async (req, res, next) => {
 })
 
 app.use("/api/chat", require("./routes/chat.routes"))
+app.use("/api/daily-quote", require("./routes/dailyQuote.routes"))
 app.use("/api/private-notes", require("./routes/privateNotes.routes"))
 app.use("/api/users", require("./routes/user.routes"))
 

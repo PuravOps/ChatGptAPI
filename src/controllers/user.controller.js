@@ -13,7 +13,7 @@ const mapPublicUser = (user) => {
 // Register
 exports.register = async (req, res) => {
   try {
-    const { name, phone, password } = req.body
+    const { name, phone, password, themePreference } = req.body
 
     const existing = await User.findOne({ phone })
     if (existing) {
@@ -26,6 +26,8 @@ exports.register = async (req, res) => {
       name,
       phone,
       password: hashedPassword,
+      themePreference:
+        themePreference === "google-chat" ? "google-chat" : "current",
     })
 
     res.status(201).json(mapPublicUser(user))
@@ -99,7 +101,7 @@ exports.getUserPresence = async (req, res) => {
 exports.updateUser = async (req, res) => {
   try {
     const { id } = req.params
-    const { name, phone, password } = req.body
+    const { name, phone, password, themePreference } = req.body
 
     const existingUser = await User.findById(id)
     if (!existingUser) {
@@ -135,6 +137,13 @@ exports.updateUser = async (req, res) => {
 
     if (typeof password === "string" && password.trim()) {
       update.password = await bcrypt.hash(password.trim(), 10)
+    }
+
+    if (themePreference !== undefined) {
+      if (!["current", "google-chat"].includes(themePreference)) {
+        return res.status(400).json({ message: "Invalid theme preference" })
+      }
+      update.themePreference = themePreference
     }
 
     const user = await User.findByIdAndUpdate(
